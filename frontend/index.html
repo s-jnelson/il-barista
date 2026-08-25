@@ -469,7 +469,7 @@ function renderGrid(items, id) {
 
 async function checkStatus() {
   try {
-    const r = await fetch(API + '/status', {signal: AbortSignal.timeout(4000)});
+    const r = await fetch(API + '/status');
     const d = await r.json();
     const badge = document.getElementById('ollama-badge');
     const dot = document.getElementById('ollama-dot');
@@ -500,8 +500,7 @@ async function doSearch(q) {
   showThinking(true);
   nav('agent');
   try {
-    const r = await fetch(API + '/search?q=' + encodeURIComponent(query),
-      {signal: AbortSignal.timeout(380000)});
+    const r = await fetch(API + '/search?q=' + encodeURIComponent(query));
     const d = await r.json();
     const coffees = d.coffees || [];
     renderGrid(coffees, 'results-grid');
@@ -519,8 +518,8 @@ async function doSearch(q) {
     }
   } catch(e) {
     document.getElementById('results-grid').innerHTML =
-      '<p style="color:var(--smoke);padding:20px;font-style:italic">Search timed out or Ollama is loading. Try again in a moment.</p>';
-    toast('Search error - is Ollama running?');
+      '<p style="color:var(--smoke);padding:20px;font-style:italic">Search error - please try again.</p>';
+    toast('Search error: ' + e.message);
   } finally {
     showThinking(false);
   }
