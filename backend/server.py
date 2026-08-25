@@ -166,9 +166,7 @@ def safe_get(url, timeout=12):
     try:
         r = requests.get(url, headers=HEADERS, timeout=timeout)
         r.raise_for_status()
-        result = r.json()
-        print(f"[groq] Response keys: {list(result.keys())}")
-        return result["choices"][0]["message"]["content"]
+        return BeautifulSoup(r.text, "html.parser")
     except Exception as e:
         print(f"[scraper] {url} -> {e}")
         return None
@@ -252,6 +250,7 @@ def check_groq():
 
 def groq_query(prompt, system):
     if not GROQ_API_KEY:
+        print("[groq] No API key configured")
         return None
     try:
         r = requests.post(GROQ_URL,
@@ -270,10 +269,15 @@ def groq_query(prompt, system):
             },
             timeout=30
         )
+        print(f"[groq] Status: {r.status_code}")
         r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
+        result = r.json()
+        content = result["choices"][0]["message"]["content"]
+        print(f"[groq] Response length: {len(content)} chars")
+        print(f"[groq] Preview: {content[:300]}")
+        return content
     except Exception as e:
-        print(f"[groq] Error: {e}")
+        print(f"[groq] Error: {type(e).__name__}: {e}")
         return None
 
 def agent_search(query=""):
@@ -346,11 +350,9 @@ def background_refresh():
             _cache["time"] = datetime.now().isoformat()
             _cache["data"] = data
             print(f"[agent] Refresh complete — {len(data.get('coffees',[]))} results")
-    except Exception as e:
-        print(f"[groq] Error: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+        except Exception as e:
+            print(f"[agent] Refresh error: {e}")
+        time.sleep(6 * 3600)
 
 # ── API ROUTES ────────────────────────────────────────────────────────────
 @app.route("/")
