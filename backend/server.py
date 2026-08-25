@@ -4,7 +4,12 @@ Groq LLM + Web Scraping, deployable to Railway/Render
 Shared communal database for all users
 """
 
-import json, os, sqlite3, threading, time, re, random
+import json, os, threading, time, re, random
+try:
+    import psycopg2
+    import psycopg2.extras
+except ImportError:
+    psycopg2 = None
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
@@ -14,7 +19,7 @@ from bs4 import BeautifulSoup
 
 # ── CONFIG ──────────────────────────────────────────────────────────────
 BASE_DIR   = Path(__file__).parent.parent
-DB_PATH    = BASE_DIR / "data" / "barista.db"
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 FRONT_DIR  = BASE_DIR / "frontend"
 
 # Groq config - set via environment variable on Railway
@@ -37,12 +42,10 @@ CORS(app)
 
 # ── DATABASE ─────────────────────────────────────────────────────────────
 def init_db():
-    DB_PATH.parent.mkdir(exist_ok=True)
-    con = sqlite3.connect(DB_PATH)
+    con = get_db()
     cur = con.cursor()
-    cur.executescript("""
-        CREATE TABLE IF NOT EXISTS coffees (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    cur.execute("""CREATE TABLE IF NOT EXISTS coffees (
+            id           SERIAL PRIMARY KEY,
             name         TEXT NOT NULL,
             roaster      TEXT,
             origin       TEXT,
@@ -59,10 +62,10 @@ def init_db():
             agent_pick   INTEGER DEFAULT 0,
             status       TEXT DEFAULT 'new',
             added_by     TEXT DEFAULT 'Agent',
-            added_at     TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS purchases (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            added_at     TEXT DEFAULT current_timestamp
+        )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS purchases (
+            id          SERIAL PRIMARY KEY,
             bean_name   TEXT,
             roaster     TEXT,
             ordered_at  TEXT,
@@ -71,10 +74,10 @@ def init_db():
             status      TEXT DEFAULT 'ordered',
             notes       TEXT,
             added_by    TEXT DEFAULT 'Anonymous',
-            added_at    TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS journal (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            added_at    TEXT DEFAULT current_timestamp
+        )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS journal (
+            id          SERIAL PRIMARY KEY,
             bean_name   TEXT,
             brew_method TEXT,
             grind       TEXT,
@@ -84,28 +87,28 @@ def init_db():
             notes       TEXT,
             rating      INTEGER,
             added_by    TEXT DEFAULT 'Anonymous',
-            created_at  TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS roasters (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at  TEXT DEFAULT current_timestamp
+        )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS roasters (
+            id        SERIAL PRIMARY KEY,
             name      TEXT UNIQUE,
             url       TEXT,
             location  TEXT,
             notes     TEXT,
             added_by  TEXT DEFAULT 'Anonymous',
-            saved_at  TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS agent_log (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            saved_at  TEXT DEFAULT current_timestamp
+        )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS agent_log (
+            id           SERIAL PRIMARY KEY,
             query        TEXT,
             sources      TEXT,
             result_count INTEGER,
-            ran_at       TEXT DEFAULT (datetime('now'))
-        );
-    """)
+            ran_at       TEXT DEFAULT current_timestamp
+        )""")
     con.commit()
     _seed_demo_data(cur, con)
     con.close()
+
 
 def _seed_demo_data(cur, con):
     cur.execute("SELECT COUNT(*) FROM coffees")
@@ -138,28 +141,32 @@ def _seed_demo_data(cur, con):
          "Stumptown flagship espresso blend, a Portland institution since 2001. Three-continent complexity in every cup.",
          "https://www.stumptowncoffee.com","https://www.home-barista.com",1,"new","Agent"),
     ]
-    cur.executemany("""
-        INSERT INTO coffees (name,roaster,origin,roast,process,altitude,price,rating,rating_src,
+    for row in demo:
+        cur.execute("""INSERT INTO coffees (name,roaster,origin,roast,process,altitude,price,rating,rating_src,
         flavors,commentary,purchase_url,review_url,agent_pick,status,added_by)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", demo)
-    cur.executemany("""
-        INSERT INTO purchases (bean_name,roaster,ordered_at,amount,price,status,added_by)
-        VALUES (?,?,?,?,?,?,?)""", [
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""", row)
+    for row in [
         ("Lavazza Super Crema","Lavazza","2026-08-10","2 x 1lb","$24.00","delivered","Steve"),
         ("Espresso Classico","Intelligentsia","2026-08-18","1 x 12oz","$21.00","delivered","Steve"),
-    ])
-    cur.executemany("""
-        INSERT INTO roasters (name,url,location,notes,added_by) VALUES (?,?,?,?,?)""", [
+    ]:
+        cur.execute("""INSERT INTO purchases (bean_name,roaster,ordered_at,amount,price,status,added_by)
+        VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""", row)
+    for row in [
         ("Intelligentsia Coffee","https://www.intelligentsiacoffee.com","Chicago, IL","Third-wave pioneer, legendary espresso blends.","Agent"),
         ("Onyx Coffee Lab","https://onyxcoffeelab.com","Rogers, AR","Multiple SCA Roaster of the Year.","Agent"),
         ("Stumptown Coffee","https://www.stumptowncoffee.com","Portland, OR","Pacific Northwest icon, Hair Bender is a must-try.","Agent"),
-    ])
+    ]:
+        cur.execute("""INSERT INTO roasters (name,url,location,notes,added_by)
+        VALUES (%s,%s,%s,%s,%s) ON CONFLICT (name) DO NOTHING""", row)
     con.commit()
 
 def get_db():
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
+    con = psycopg2.connect(DATABASE_URL, sslmode='require')
     return con
+
+def dict_rows(cur):
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 # ── WEB SCRAPER ───────────────────────────────────────────────────────────
 def safe_get(url, timeout=12):
@@ -404,11 +411,13 @@ def api_coffees():
     status = request.args.get("status")
     con = get_db()
     if status:
-        rows = con.execute("SELECT * FROM coffees WHERE status=? ORDER BY added_at DESC", (status,)).fetchall()
+        rows = con.execute("SELECT * FROM coffees WHERE status=%s ORDER BY added_at DESC", (status,)).fetchall()
     else:
-        rows = con.execute("SELECT * FROM coffees ORDER BY added_at DESC").fetchall()
+        cur = con.cursor()
+    cur.execute("SELECT * FROM coffees ORDER BY added_at DESC")
+    rows = dict_rows(cur)
     con.close()
-    return jsonify([dict(r) for r in rows])
+    return jsonify(rows)
 
 @app.route("/api/coffees", methods=["POST"])
 def api_add_coffee():
@@ -417,8 +426,8 @@ def api_add_coffee():
     con.execute("""INSERT INTO coffees
         (name,roaster,origin,roast,process,altitude,price,rating,rating_src,
         flavors,commentary,purchase_url,review_url,agent_pick,status,added_by)
-        VALUES (:name,:roaster,:origin,:roast,:process,:altitude,:price,:rating,
-        :rating_source,:flavors,:commentary,:purchase_url,:review_url,:agent_pick,:status,:added_by)""",
+        VALUES (%(name)s,%(roaster)s,%(origin)s,%(roast)s,%(process)s,%(altitude)s,%(price)s,%(rating)s,
+        %(rating_source)s,%(flavors)s,%(commentary)s,%(purchase_url)s,%(review_url)s,%(agent_pick)s,%(status)s,%(added_by)s)""",
         {
             "name": data.get("name",""), "roaster": data.get("roaster",""),
             "origin": data.get("origin",""), "roast": data.get("roast",""),
@@ -442,23 +451,25 @@ def api_update_coffee(cid):
     con = get_db()
     for field in ["status","rating","notes"]:
         if field in data:
-            con.execute(f"UPDATE coffees SET {field}=? WHERE id=?", (data[field], cid))
+            con.execute(f"UPDATE coffees SET {field}=? WHERE id=%s", (data[field], cid))
     con.commit(); con.close()
     return jsonify({"ok": True})
 
 @app.route("/api/purchases", methods=["GET"])
 def api_purchases():
     con = get_db()
-    rows = con.execute("SELECT * FROM purchases ORDER BY added_at DESC").fetchall()
+    cur = con.cursor()
+    cur.execute("SELECT * FROM purchases ORDER BY added_at DESC")
+    rows = dict_rows(cur)
     con.close()
-    return jsonify([dict(r) for r in rows])
+    return jsonify(rows)
 
 @app.route("/api/purchases", methods=["POST"])
 def api_add_purchase():
     data = request.json
     con = get_db()
     con.execute("""INSERT INTO purchases (bean_name,roaster,ordered_at,amount,price,status,notes,added_by)
-        VALUES (:bean_name,:roaster,:ordered_at,:amount,:price,:status,:notes,:added_by)""",
+        VALUES (%(bean_name)s,%(roaster)s,%(ordered_at)s,%(amount)s,%(price)s,%(status)s,%(notes)s,%(added_by)s)""",
         {"bean_name":data.get("bean_name",""),"roaster":data.get("roaster",""),
          "ordered_at":data.get("ordered_at",datetime.now().strftime("%Y-%m-%d")),
          "amount":data.get("amount",""),"price":data.get("price",""),
@@ -470,16 +481,18 @@ def api_add_purchase():
 @app.route("/api/journal", methods=["GET"])
 def api_journal():
     con = get_db()
-    rows = con.execute("SELECT * FROM journal ORDER BY created_at DESC").fetchall()
+    cur = con.cursor()
+    cur.execute("SELECT * FROM journal ORDER BY created_at DESC")
+    rows = dict_rows(cur)
     con.close()
-    return jsonify([dict(r) for r in rows])
+    return jsonify(rows)
 
 @app.route("/api/journal", methods=["POST"])
 def api_add_journal():
     data = request.json
     con = get_db()
     con.execute("""INSERT INTO journal (bean_name,brew_method,grind,dose,yield,time_sec,notes,rating,added_by)
-        VALUES (:bean_name,:brew_method,:grind,:dose,:yield,:time_sec,:notes,:rating,:added_by)""",
+        VALUES (%(bean_name)s,%(brew_method)s,%(grind)s,%(dose)s,%(yield)s,%(time_sec)s,%(notes)s,%(rating)s,%(added_by)s)""",
         {"bean_name":data.get("bean_name",""),"brew_method":data.get("brew_method",""),
          "grind":data.get("grind",""),"dose":data.get("dose",""),
          "yield":data.get("yield",""),"time_sec":data.get("time_sec",0),
@@ -491,15 +504,18 @@ def api_add_journal():
 @app.route("/api/roasters", methods=["GET"])
 def api_roasters():
     con = get_db()
-    rows = con.execute("SELECT * FROM roasters ORDER BY saved_at DESC").fetchall()
+    cur = con.cursor()
+    cur.execute("SELECT * FROM roasters ORDER BY saved_at DESC")
+    rows = dict_rows(cur)
     con.close()
-    return jsonify([dict(r) for r in rows])
+    return jsonify(rows)
 
 @app.route("/api/roasters", methods=["POST"])
 def api_add_roaster():
     data = request.json
     con = get_db()
-    con.execute("INSERT OR IGNORE INTO roasters (name,url,location,notes,added_by) VALUES (:name,:url,:location,:notes,:added_by)",
+    cur = con.cursor()
+    cur.execute("INSERT INTO roasters (name,url,location,notes,added_by) VALUES (%(name)s,%(url)s,%(location)s,%(notes)s,%(added_by)s) ON CONFLICT (name) DO NOTHING",
         {**data, "added_by": data.get("added_by","Anonymous")})
     con.commit(); con.close()
     return jsonify({"ok": True})
@@ -511,7 +527,7 @@ if __name__ == "__main__":
     print("=" * 55)
     init_db()
     print(f"  Groq AI   : {'✓ Configured' if check_groq() else '✗ Missing GROQ_API_KEY'}")
-    print(f"  Database  : {DB_PATH}")
+    print(f"  Database  : PostgreSQL (Railway)")
     port = int(os.environ.get("PORT", 5000))
     print(f"  Server    : http://0.0.0.0:{port}")
     print("=" * 55)
