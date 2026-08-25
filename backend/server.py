@@ -263,7 +263,7 @@ def groq_query(prompt, system):
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.7,
-        "max_tokens": 1200
+        "max_tokens": 2000
     }
     try:
         r = requests.post(GROQ_URL, headers=headers, json=payload, timeout=45)
