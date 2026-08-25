@@ -1,15 +1,9 @@
 """
 Il Barista - Cloud Version
-Groq LLM + Web Scraping, deployable to Railway/Render
-Shared communal database for all users
+Groq LLM + Web Scraping + SQLite (Railway Volume)
 """
 
-import json, os, threading, time, re, random
-try:
-    import psycopg2
-    import psycopg2.extras
-except ImportError:
-    psycopg2 = None
+import json, os, sqlite3, threading, time, re, random
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
@@ -17,23 +11,20 @@ from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 
-# ── CONFIG ──────────────────────────────────────────────────────────────
 BASE_DIR   = Path(__file__).parent.parent
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
 FRONT_DIR  = BASE_DIR / "frontend"
 
-# Groq config - set via environment variable on Railway
+# Use /tmp for SQLite - works on all Railway deployments
+# Note: /tmp resets on redeploy but data persists during runtime
+DB_PATH = Path("/tmp/barista.db")
+
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL   = "openai/gpt-oss-20b"  # Fast, free, excellent quality
+GROQ_MODEL   = "openai/gpt-oss-20b"
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
 }
 
@@ -42,10 +33,11 @@ CORS(app)
 
 # ── DATABASE ─────────────────────────────────────────────────────────────
 def init_db():
-    con = get_db()
+    con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
-    cur.execute("""CREATE TABLE IF NOT EXISTS coffees (
-            id           SERIAL PRIMARY KEY,
+    cur.executescript("""
+        CREATE TABLE IF NOT EXISTS coffees (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
             name         TEXT NOT NULL,
             roaster      TEXT,
             origin       TEXT,
@@ -62,10 +54,10 @@ def init_db():
             agent_pick   INTEGER DEFAULT 0,
             status       TEXT DEFAULT 'new',
             added_by     TEXT DEFAULT 'Agent',
-            added_at     TEXT DEFAULT current_timestamp
-        )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS purchases (
-            id          SERIAL PRIMARY KEY,
+            added_at     TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS purchases (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
             bean_name   TEXT,
             roaster     TEXT,
             ordered_at  TEXT,
@@ -74,10 +66,10 @@ def init_db():
             status      TEXT DEFAULT 'ordered',
             notes       TEXT,
             added_by    TEXT DEFAULT 'Anonymous',
-            added_at    TEXT DEFAULT current_timestamp
-        )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS journal (
-            id          SERIAL PRIMARY KEY,
+            added_at    TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS journal (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
             bean_name   TEXT,
             brew_method TEXT,
             grind       TEXT,
@@ -87,28 +79,28 @@ def init_db():
             notes       TEXT,
             rating      INTEGER,
             added_by    TEXT DEFAULT 'Anonymous',
-            created_at  TEXT DEFAULT current_timestamp
-        )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS roasters (
-            id        SERIAL PRIMARY KEY,
+            created_at  TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS roasters (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
             name      TEXT UNIQUE,
             url       TEXT,
             location  TEXT,
             notes     TEXT,
             added_by  TEXT DEFAULT 'Anonymous',
-            saved_at  TEXT DEFAULT current_timestamp
-        )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS agent_log (
-            id           SERIAL PRIMARY KEY,
+            saved_at  TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS agent_log (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
             query        TEXT,
             sources      TEXT,
             result_count INTEGER,
-            ran_at       TEXT DEFAULT current_timestamp
-        )""")
+            ran_at       TEXT DEFAULT (datetime('now'))
+        );
+    """)
     con.commit()
     _seed_demo_data(cur, con)
     con.close()
-
 
 def _seed_demo_data(cur, con):
     cur.execute("SELECT COUNT(*) FROM coffees")
@@ -119,54 +111,51 @@ def _seed_demo_data(cur, con):
          "$21.00 / 12oz",4.6,"CoffeeReview.com 94pts",
          '["Dark Chocolate","Brown Sugar","Dried Cherry","Full Body"]',
          "A quintessential espresso blend with extraordinary balance. Brazil base delivers velvet body, Ethiopian component adds a winey sweetness.",
-         "https://www.intelligentsiacoffee.com","https://www.coffeereview.com",1,"tried","Agent"),
+         "https://www.intelligentsia.com/collections/espresso","https://www.coffeereview.com",1,"tried","Agent"),
         ("Black Cat Classic","Intelligentsia Coffee","Central & South America","Medium Dark","Washed","1400-1900 masl",
          "$20.00 / 12oz",4.7,"Home-Barista.com Community Favourite",
          '["Milk Chocolate","Caramel","Walnut","Heavy Crema"]',
          "Gold standard Italian-style espresso. Exceptionally forgiving and produces outstanding thick crema.",
-         "https://www.intelligentsiacoffee.com","https://www.home-barista.com",1,"wishlist","Agent"),
+         "https://www.intelligentsia.com/collections/espresso","https://www.home-barista.com",1,"wishlist","Agent"),
         ("Super Crema","Lavazza","Brazil / Colombia","Medium Dark","Natural","900-1200 masl",
          "$12.00 / 1lb",4.3,"Amazon 4.3 stars",
          '["Hazelnut","Honey","Almond","Thick Crema"]',
          "Italian classic with Robusta for persistent crema. The go-to daily driver for value and consistency.",
-         "https://www.lavazza.com","https://www.amazon.com",0,"tried","Agent"),
-        ("Espresso Blend No.1","Onyx Coffee Lab","Ethiopia / Guatemala","Medium","Washed","1800-2200 masl",
-         "$22.00 / 12oz",4.8,"CoffeeReview.com 97pts",
-         '["Hibiscus","Apricot Jam","Milk Chocolate","Bright"]',
-         "Multiple SCA award-winning blend. Stone fruit brightness balanced by creamy chocolate body.",
-         "https://onyxcoffeelab.com","https://www.coffeereview.com",1,"wishlist","Agent"),
+         "https://www.lavazza.com/en-us/coffee/espresso","https://www.amazon.com",0,"tried","Agent"),
         ("Hair Bender","Stumptown Coffee","Latin America / East Africa / Indonesia","Medium Dark","Mixed","1400-1900 masl",
          "$17.00 / 12oz",4.5,"Home-Barista Community Favourite",
          '["Dark Fruit","Caramel","Citrus","Heavy Body"]',
-         "Stumptown flagship espresso blend, a Portland institution since 2001. Three-continent complexity in every cup.",
-         "https://www.stumptowncoffee.com","https://www.home-barista.com",1,"new","Agent"),
+         "Stumptown flagship espresso blend, a Portland institution since 2001. Three-continent complexity delivers remarkable consistency.",
+         "https://www.stumptowncoffee.com/collections/coffee","https://www.home-barista.com",1,"new","Agent"),
+        ("Monarch","Onyx Coffee Lab","Colombia / Ethiopia","Dark","Natural","1800-2200 masl",
+         "$22.00 / 12oz",4.7,"CoffeeReview.com 95pts",
+         '["Dark Chocolate","Winey Berry","Caramel","Full Body"]',
+         "Onyx flagship dark blend designed for milk drinks and espresso. Natural processed Colombia binds to fat for complex caramelized notes.",
+         "https://onyxcoffeelab.com/collections/coffee","https://www.coffeereview.com",1,"new","Agent"),
     ]
-    for row in demo:
-        cur.execute("""INSERT INTO coffees (name,roaster,origin,roast,process,altitude,price,rating,rating_src,
+    cur.executemany("""
+        INSERT INTO coffees (name,roaster,origin,roast,process,altitude,price,rating,rating_src,
         flavors,commentary,purchase_url,review_url,agent_pick,status,added_by)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""", row)
-    for row in [
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", demo)
+    cur.executemany("""
+        INSERT INTO purchases (bean_name,roaster,ordered_at,amount,price,status,added_by)
+        VALUES (?,?,?,?,?,?,?)""", [
         ("Lavazza Super Crema","Lavazza","2026-08-10","2 x 1lb","$24.00","delivered","Steve"),
         ("Espresso Classico","Intelligentsia","2026-08-18","1 x 12oz","$21.00","delivered","Steve"),
-    ]:
-        cur.execute("""INSERT INTO purchases (bean_name,roaster,ordered_at,amount,price,status,added_by)
-        VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""", row)
-    for row in [
-        ("Intelligentsia Coffee","https://www.intelligentsiacoffee.com","Chicago, IL","Third-wave pioneer, legendary espresso blends.","Agent"),
-        ("Onyx Coffee Lab","https://onyxcoffeelab.com","Rogers, AR","Multiple SCA Roaster of the Year.","Agent"),
+    ])
+    cur.executemany("""
+        INSERT INTO roasters (name,url,location,notes,added_by) VALUES (?,?,?,?,?)""", [
+        ("Intelligentsia Coffee","https://www.intelligentsia.com","Chicago, IL","Third-wave pioneer, legendary espresso blends.","Agent"),
+        ("Onyx Coffee Lab","https://onyxcoffeelab.com","Rogers, AR","Multiple SCA Roaster of the Year. Current blends: Monarch, Geometry, Southern Weather.","Agent"),
         ("Stumptown Coffee","https://www.stumptowncoffee.com","Portland, OR","Pacific Northwest icon, Hair Bender is a must-try.","Agent"),
-    ]:
-        cur.execute("""INSERT INTO roasters (name,url,location,notes,added_by)
-        VALUES (%s,%s,%s,%s,%s) ON CONFLICT (name) DO NOTHING""", row)
+        ("Lavazza","https://www.lavazza.com","Turin, Italy","Italian classic, Super Crema is the go-to daily driver.","Agent"),
+    ])
     con.commit()
 
 def get_db():
-    con = psycopg2.connect(DATABASE_URL, sslmode='require')
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
     return con
-
-def dict_rows(cur):
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 # ── WEB SCRAPER ───────────────────────────────────────────────────────────
 def safe_get(url, timeout=12):
@@ -183,7 +172,7 @@ def scrape_coffee_review():
     for url in ["https://www.coffeereview.com/top-rated/","https://www.coffeereview.com/category/espresso/"]:
         soup = safe_get(url)
         if not soup: continue
-        for el in soup.select("h2.entry-title, h3.entry-title, .review-title, article h2, article h3")[:8]:
+        for el in soup.select("h2.entry-title,h3.entry-title,.review-title,article h2,article h3")[:8]:
             t = el.get_text(strip=True)
             if t: items.append(f"[CoffeeReview] {t}")
     return items
@@ -191,21 +180,16 @@ def scrape_coffee_review():
 def scrape_roaster_pages():
     items = []
     sources = [
-        ("Intelligentsia",   "https://www.intelligentsiacoffee.com/collections/espresso"),
-        ("Stumptown",        "https://www.stumptowncoffee.com/collections/coffee"),
-        ("Counter Culture",  "https://counterculturecoffee.com/collections/all"),
-        ("Onyx Coffee Lab",  "https://onyxcoffeelab.com/collections/espresso"),
-        ("Verve Coffee",     "https://www.vervecoffee.com/collections/espresso"),
-        ("Blue Bottle",      "https://bluebottlecoffee.com/en-us/collections/coffee"),
-        ("Heart Roasters",   "https://www.heartroasters.com/collections/espresso"),
-        ("Ruby Coffee",      "https://rubycoffeeroasters.com/collections/all"),
-        ("Madcap Coffee",    "https://madcapcoffee.com/collections/all"),
-        ("Passenger Coffee", "https://www.passengercoffee.com/collections/espresso"),
-        ("Tandem Coffee",    "https://tandemcoffee.com/collections/coffee"),
-        ("Ceremony Coffee",  "https://www.ceremonycoffee.com/collections/espresso"),
-        ("Coava Coffee",     "https://coavacoffee.com/collections/all-coffee"),
-        ("George Howell",    "https://georgehowellcoffee.com/collections/espresso"),
-        ("Equator Coffees",  "https://www.equatorcoffees.com/collections/espresso"),
+        ("Intelligentsia",  "https://www.intelligentsia.com/collections/espresso"),
+        ("Stumptown",       "https://www.stumptowncoffee.com/collections/coffee"),
+        ("Onyx Coffee Lab", "https://onyxcoffeelab.com/collections/coffee"),
+        ("Counter Culture", "https://counterculturecoffee.com/collections/all"),
+        ("George Howell",   "https://georgehowellcoffee.com/collections/all"),
+        ("Madcap Coffee",   "https://madcapcoffee.com/collections/all"),
+        ("Verve Coffee",    "https://www.vervecoffee.com/collections/espresso"),
+        ("Equator Coffees", "https://www.equatorcoffees.com/collections/coffee"),
+        ("Tandem Coffee",   "https://tandemcoffee.com/collections/coffee"),
+        ("Ceremony Coffee", "https://www.ceremonycoffee.com/collections/espresso"),
     ]
     random.shuffle(sources)
     for name, url in sources[:5]:
@@ -302,17 +286,25 @@ def agent_search(query=""):
     )
 
     prompt = (
-        f"USER PREFERENCES: Specialty whole bean coffee enthusiast. "
-        f"Loves thick full-bodied espresso and americano. "
-        f"Prefers medium-dark to dark roasts with chocolate, caramel, nut profiles. "
-        f"Also open to interesting single origins and naturals. "
-        f"Price range $12-$40 per bag.\n\n"
+        "USER PREFERENCES: Specialty whole bean coffee enthusiast. "
+        "Loves thick full-bodied espresso and americano. "
+        "Prefers medium-dark to dark roasts with chocolate, caramel, nut profiles. "
+        "Also open to interesting single origins and naturals. "
+        "Price range $12-$40 per bag.\n\n"
         f"USER QUERY: {query or 'Discover excellent espresso beans from diverse roasters.'}\n\n"
         + (f"SCRAPED FROM SPECIALTY SOURCES:\n{raw_text}\n\n" if raw_text else "")
         + "Return exactly 4 whole bean coffee recommendations as a JSON array. "
         "Each object must have: name, roaster, roaster_url, origin, roast, process, altitude, "
         "price, rating (number), rating_source, flavors (array of 3-4 strings), commentary (2 sentences), "
         "purchase_url, review_url, agent_pick (true/false). "
+        "CRITICAL FOR PURCHASE_URL: Only use the roaster homepage or main shop collection page. "
+        "Never fabricate specific product URLs. Use formats like: "
+        "https://onyxcoffeelab.com/collections/coffee, "
+        "https://www.stumptowncoffee.com/collections/coffee, "
+        "https://counterculturecoffee.com/collections/all, "
+        "https://www.intelligentsia.com/collections/espresso, "
+        "https://www.equatorcoffees.com/collections/coffee. "
+        "If unsure of the exact shop URL use just the roaster homepage. "
         "Prioritize variety across roasters, origins, and price points. "
         "Return ONLY the JSON array."
     )
@@ -320,9 +312,7 @@ def agent_search(query=""):
     response = groq_query(prompt, system)
     coffees = []
     if response:
-        # Strip markdown fences
         response = re.sub(r'```[a-z]*', '', response).strip()
-        # Try full array parse first
         try:
             match = re.search(r'\[.*\]', response, re.DOTALL)
             if match:
@@ -330,7 +320,6 @@ def agent_search(query=""):
                 print(f"[groq] Parsed {len(coffees)} full results")
         except Exception as e:
             print(f"[groq] Full parse error: {e}")
-            # Try extracting individual objects
             try:
                 objects = re.findall(r'\{[^{}]*\}', response, re.DOTALL)
                 for obj in objects:
@@ -352,17 +341,19 @@ def agent_search(query=""):
         con = get_db()
         con.execute("INSERT INTO agent_log (query,sources,result_count) VALUES (?,?,?)",
             (query, f"{len(raw)} scraped items", len(coffees)))
-        con.commit(); con.close()
-    except: pass
+        con.commit()
+        con.close()
+    except Exception as e:
+        print(f"[agent_log] {e}")
 
     return {"coffees": coffees, "sources_scraped": len(raw), "ran_at": datetime.now().isoformat()}
 
 def _fallback_coffees():
     return [
-        {"name":"Espresso Classico","roaster":"Intelligentsia Coffee","roaster_url":"https://www.intelligentsiacoffee.com","origin":"Brazil / Ethiopia","roast":"Medium Dark","process":"Washed","altitude":"1200-1800 masl","price":"$21.00 / 12oz","rating":4.6,"rating_source":"CoffeeReview.com 94pts","flavors":["Dark Chocolate","Brown Sugar","Dried Cherry","Full Body"],"commentary":"A quintessential espresso blend with extraordinary balance. Brazil base delivers velvet body, Ethiopian component adds winey sweetness.","purchase_url":"https://www.intelligentsiacoffee.com/products/espresso-classico","review_url":"https://www.coffeereview.com","agent_pick":True},
-        {"name":"Espresso Blend No.1","roaster":"Onyx Coffee Lab","roaster_url":"https://onyxcoffeelab.com","origin":"Ethiopia / Guatemala","roast":"Medium","process":"Washed","altitude":"1800-2200 masl","price":"$22.00 / 12oz","rating":4.8,"rating_source":"CoffeeReview.com 97pts","flavors":["Hibiscus","Apricot Jam","Milk Chocolate","Bright"],"commentary":"Multiple SCA award-winning blend. Stone fruit brightness balanced by creamy chocolate body.","purchase_url":"https://onyxcoffeelab.com/collections/espresso","review_url":"https://www.coffeereview.com","agent_pick":True},
-        {"name":"Hair Bender","roaster":"Stumptown Coffee","roaster_url":"https://www.stumptowncoffee.com","origin":"Latin America / East Africa / Indonesia","roast":"Medium Dark","process":"Mixed","altitude":"1400-1900 masl","price":"$17.00 / 12oz","rating":4.5,"rating_source":"Home-Barista Community Favourite","flavors":["Dark Fruit","Caramel","Citrus","Heavy Body"],"commentary":"Stumptown flagship espresso blend, a Portland institution since 2001. Three-continent complexity delivers remarkable consistency.","purchase_url":"https://www.stumptowncoffee.com/products/hair-bender","review_url":"https://www.home-barista.com","agent_pick":True},
-        {"name":"Super Crema","roaster":"Lavazza","roaster_url":"https://www.lavazza.com","origin":"Brazil / Colombia","roast":"Medium Dark","process":"Natural","altitude":"900-1200 masl","price":"$12.00 / 1lb","rating":4.3,"rating_source":"Amazon 4.3 stars (8,400+ reviews)","flavors":["Hazelnut","Honey","Almond","Thick Crema"],"commentary":"Italian classic with Robusta for persistent crema. The go-to daily driver for value and consistency.","purchase_url":"https://www.lavazza.com/en-us/coffee/espresso/super-crema-espresso.html","review_url":"https://www.amazon.com","agent_pick":False},
+        {"name":"Espresso Classico","roaster":"Intelligentsia Coffee","roaster_url":"https://www.intelligentsia.com","origin":"Brazil / Ethiopia","roast":"Medium Dark","process":"Washed","altitude":"1200-1800 masl","price":"$21.00 / 12oz","rating":4.6,"rating_source":"CoffeeReview.com 94pts","flavors":["Dark Chocolate","Brown Sugar","Dried Cherry","Full Body"],"commentary":"A quintessential espresso blend with extraordinary balance. Brazil base delivers velvet body, Ethiopian component adds winey sweetness.","purchase_url":"https://www.intelligentsia.com/collections/espresso","review_url":"https://www.coffeereview.com","agent_pick":True},
+        {"name":"Monarch","roaster":"Onyx Coffee Lab","roaster_url":"https://onyxcoffeelab.com","origin":"Colombia / Ethiopia","roast":"Dark","process":"Natural","altitude":"1800-2200 masl","price":"$22.00 / 12oz","rating":4.7,"rating_source":"CoffeeReview.com 95pts","flavors":["Dark Chocolate","Winey Berry","Caramel","Full Body"],"commentary":"Onyx flagship dark blend. Natural processed Colombia creates complex caramelized notes — outstanding as espresso or with milk.","purchase_url":"https://onyxcoffeelab.com/collections/coffee","review_url":"https://www.coffeereview.com","agent_pick":True},
+        {"name":"Hair Bender","roaster":"Stumptown Coffee","roaster_url":"https://www.stumptowncoffee.com","origin":"Latin America / East Africa / Indonesia","roast":"Medium Dark","process":"Mixed","altitude":"1400-1900 masl","price":"$17.00 / 12oz","rating":4.5,"rating_source":"Home-Barista Community Favourite","flavors":["Dark Fruit","Caramel","Citrus","Heavy Body"],"commentary":"Stumptown flagship espresso blend, a Portland institution since 2001. Three-continent complexity delivers remarkable consistency.","purchase_url":"https://www.stumptowncoffee.com/collections/coffee","review_url":"https://www.home-barista.com","agent_pick":True},
+        {"name":"Super Crema","roaster":"Lavazza","roaster_url":"https://www.lavazza.com","origin":"Brazil / Colombia","roast":"Medium Dark","process":"Natural","altitude":"900-1200 masl","price":"$12.00 / 1lb","rating":4.3,"rating_source":"Amazon 4.3 stars (8,400+ reviews)","flavors":["Hazelnut","Honey","Almond","Thick Crema"],"commentary":"Italian classic with Robusta for persistent crema. The go-to daily driver for value and consistency.","purchase_url":"https://www.lavazza.com/en-us/coffee/espresso","review_url":"https://www.amazon.com","agent_pick":False},
     ]
 
 # ── BACKGROUND REFRESH ────────────────────────────────────────────────────
@@ -411,13 +402,11 @@ def api_coffees():
     status = request.args.get("status")
     con = get_db()
     if status:
-        rows = con.execute("SELECT * FROM coffees WHERE status=%s ORDER BY added_at DESC", (status,)).fetchall()
+        rows = con.execute("SELECT * FROM coffees WHERE status=? ORDER BY added_at DESC", (status,)).fetchall()
     else:
-        cur = con.cursor()
-    cur.execute("SELECT * FROM coffees ORDER BY added_at DESC")
-    rows = dict_rows(cur)
+        rows = con.execute("SELECT * FROM coffees ORDER BY added_at DESC").fetchall()
     con.close()
-    return jsonify(rows)
+    return jsonify([dict(r) for r in rows])
 
 @app.route("/api/coffees", methods=["POST"])
 def api_add_coffee():
@@ -426,22 +415,17 @@ def api_add_coffee():
     con.execute("""INSERT INTO coffees
         (name,roaster,origin,roast,process,altitude,price,rating,rating_src,
         flavors,commentary,purchase_url,review_url,agent_pick,status,added_by)
-        VALUES (%(name)s,%(roaster)s,%(origin)s,%(roast)s,%(process)s,%(altitude)s,%(price)s,%(rating)s,
-        %(rating_source)s,%(flavors)s,%(commentary)s,%(purchase_url)s,%(review_url)s,%(agent_pick)s,%(status)s,%(added_by)s)""",
-        {
-            "name": data.get("name",""), "roaster": data.get("roaster",""),
-            "origin": data.get("origin",""), "roast": data.get("roast",""),
-            "process": data.get("process",""), "altitude": data.get("altitude",""),
-            "price": data.get("price",""), "rating": data.get("rating",0),
-            "rating_source": data.get("rating_source",""),
-            "flavors": json.dumps(data.get("flavors",[])) if isinstance(data.get("flavors"),list) else data.get("flavors","[]"),
-            "commentary": data.get("commentary",""),
-            "purchase_url": data.get("purchase_url",""),
-            "review_url": data.get("review_url",""),
-            "agent_pick": 1 if data.get("agent_pick") else 0,
-            "status": data.get("status","new"),
-            "added_by": data.get("added_by","Anonymous")
-        })
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+        data.get("name",""), data.get("roaster",""),
+        data.get("origin",""), data.get("roast",""),
+        data.get("process",""), data.get("altitude",""),
+        data.get("price",""), data.get("rating",0),
+        data.get("rating_source",""),
+        json.dumps(data.get("flavors",[])) if isinstance(data.get("flavors"),list) else data.get("flavors","[]"),
+        data.get("commentary",""), data.get("purchase_url",""),
+        data.get("review_url",""), 1 if data.get("agent_pick") else 0,
+        data.get("status","new"), data.get("added_by","Anonymous")
+    ))
     con.commit(); con.close()
     return jsonify({"ok": True})
 
@@ -451,74 +435,79 @@ def api_update_coffee(cid):
     con = get_db()
     for field in ["status","rating","notes"]:
         if field in data:
-            con.execute(f"UPDATE coffees SET {field}=? WHERE id=%s", (data[field], cid))
+            con.execute(f"UPDATE coffees SET {field}=? WHERE id=?", (data[field], cid))
     con.commit(); con.close()
     return jsonify({"ok": True})
 
 @app.route("/api/purchases", methods=["GET"])
 def api_purchases():
     con = get_db()
-    cur = con.cursor()
-    cur.execute("SELECT * FROM purchases ORDER BY added_at DESC")
-    rows = dict_rows(cur)
+    rows = con.execute("SELECT * FROM purchases ORDER BY added_at DESC").fetchall()
     con.close()
-    return jsonify(rows)
+    return jsonify([dict(r) for r in rows])
 
 @app.route("/api/purchases", methods=["POST"])
 def api_add_purchase():
     data = request.json
     con = get_db()
     con.execute("""INSERT INTO purchases (bean_name,roaster,ordered_at,amount,price,status,notes,added_by)
-        VALUES (%(bean_name)s,%(roaster)s,%(ordered_at)s,%(amount)s,%(price)s,%(status)s,%(notes)s,%(added_by)s)""",
-        {"bean_name":data.get("bean_name",""),"roaster":data.get("roaster",""),
-         "ordered_at":data.get("ordered_at",datetime.now().strftime("%Y-%m-%d")),
-         "amount":data.get("amount",""),"price":data.get("price",""),
-         "status":data.get("status","ordered"),"notes":data.get("notes",""),
-         "added_by":data.get("added_by","Anonymous")})
+        VALUES (?,?,?,?,?,?,?,?)""", (
+        data.get("bean_name",""), data.get("roaster",""),
+        data.get("ordered_at",datetime.now().strftime("%Y-%m-%d")),
+        data.get("amount",""), data.get("price",""),
+        data.get("status","ordered"), data.get("notes",""),
+        data.get("added_by","Anonymous")
+    ))
     con.commit(); con.close()
     return jsonify({"ok": True})
 
 @app.route("/api/journal", methods=["GET"])
 def api_journal():
     con = get_db()
-    cur = con.cursor()
-    cur.execute("SELECT * FROM journal ORDER BY created_at DESC")
-    rows = dict_rows(cur)
+    rows = con.execute("SELECT * FROM journal ORDER BY created_at DESC").fetchall()
     con.close()
-    return jsonify(rows)
+    return jsonify([dict(r) for r in rows])
 
 @app.route("/api/journal", methods=["POST"])
 def api_add_journal():
     data = request.json
     con = get_db()
     con.execute("""INSERT INTO journal (bean_name,brew_method,grind,dose,yield,time_sec,notes,rating,added_by)
-        VALUES (%(bean_name)s,%(brew_method)s,%(grind)s,%(dose)s,%(yield)s,%(time_sec)s,%(notes)s,%(rating)s,%(added_by)s)""",
-        {"bean_name":data.get("bean_name",""),"brew_method":data.get("brew_method",""),
-         "grind":data.get("grind",""),"dose":data.get("dose",""),
-         "yield":data.get("yield",""),"time_sec":data.get("time_sec",0),
-         "notes":data.get("notes",""),"rating":data.get("rating",0),
-         "added_by":data.get("added_by","Anonymous")})
+        VALUES (?,?,?,?,?,?,?,?,?)""", (
+        data.get("bean_name",""), data.get("brew_method",""),
+        data.get("grind",""), data.get("dose",""),
+        data.get("yield",""), data.get("time_sec",0),
+        data.get("notes",""), data.get("rating",0),
+        data.get("added_by","Anonymous")
+    ))
     con.commit(); con.close()
     return jsonify({"ok": True})
 
 @app.route("/api/roasters", methods=["GET"])
 def api_roasters():
     con = get_db()
-    cur = con.cursor()
-    cur.execute("SELECT * FROM roasters ORDER BY saved_at DESC")
-    rows = dict_rows(cur)
+    rows = con.execute("SELECT * FROM roasters ORDER BY saved_at DESC").fetchall()
     con.close()
-    return jsonify(rows)
+    return jsonify([dict(r) for r in rows])
 
 @app.route("/api/roasters", methods=["POST"])
 def api_add_roaster():
     data = request.json
     con = get_db()
-    cur = con.cursor()
-    cur.execute("INSERT INTO roasters (name,url,location,notes,added_by) VALUES (%(name)s,%(url)s,%(location)s,%(notes)s,%(added_by)s) ON CONFLICT (name) DO NOTHING",
-        {**data, "added_by": data.get("added_by","Anonymous")})
+    con.execute("INSERT OR IGNORE INTO roasters (name,url,location,notes,added_by) VALUES (?,?,?,?,?)", (
+        data.get("name",""), data.get("url",""),
+        data.get("location",""), data.get("notes",""),
+        data.get("added_by","Anonymous")
+    ))
     con.commit(); con.close()
     return jsonify({"ok": True})
+
+@app.route("/api/agent/log")
+def api_agent_log():
+    con = get_db()
+    rows = con.execute("SELECT * FROM agent_log ORDER BY ran_at DESC LIMIT 20").fetchall()
+    con.close()
+    return jsonify([dict(r) for r in rows])
 
 # ── MAIN ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -527,7 +516,7 @@ if __name__ == "__main__":
     print("=" * 55)
     init_db()
     print(f"  Groq AI   : {'✓ Configured' if check_groq() else '✗ Missing GROQ_API_KEY'}")
-    print(f"  Database  : PostgreSQL (Railway)")
+    print(f"  Database  : {DB_PATH}")
     port = int(os.environ.get("PORT", 5000))
     print(f"  Server    : http://0.0.0.0:{port}")
     print("=" * 55)
