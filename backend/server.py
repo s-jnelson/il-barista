@@ -20,7 +20,7 @@ FRONT_DIR  = BASE_DIR / "frontend"
 # Groq config - set via environment variable on Railway
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL   = "llama3-70b-8192"  # Fast, free, excellent quality
+GROQ_MODEL   = "openai/gpt-oss-20b"  # Fast, free, excellent quality
 
 HEADERS = {
     "User-Agent": (
