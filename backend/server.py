@@ -166,7 +166,9 @@ def safe_get(url, timeout=12):
     try:
         r = requests.get(url, headers=HEADERS, timeout=timeout)
         r.raise_for_status()
-        return BeautifulSoup(r.text, "html.parser")
+        result = r.json()
+        print(f"[groq] Response keys: {list(result.keys())}")
+        return result["choices"][0]["message"]["content"]
     except Exception as e:
         print(f"[scraper] {url} -> {e}")
         return None
@@ -344,9 +346,11 @@ def background_refresh():
             _cache["time"] = datetime.now().isoformat()
             _cache["data"] = data
             print(f"[agent] Refresh complete — {len(data.get('coffees',[]))} results")
-        except Exception as e:
-            print(f"[agent] Refresh error: {e}")
-        time.sleep(6 * 3600)
+    except Exception as e:
+        print(f"[groq] Error: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 # ── API ROUTES ────────────────────────────────────────────────────────────
 @app.route("/")
