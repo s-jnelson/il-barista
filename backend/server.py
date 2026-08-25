@@ -3,7 +3,7 @@ Il Barista - Cloud Version
 Groq LLM + Web Scraping, deployable to Railway/Render
 Shared communal database for all users
 """
- 
+
 import json, os, sqlite3, threading, time, re, random
 from datetime import datetime
 from pathlib import Path
@@ -11,17 +11,17 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
- 
+
 # ── CONFIG ──────────────────────────────────────────────────────────────
 BASE_DIR   = Path(__file__).parent.parent
 DB_PATH    = BASE_DIR / "data" / "barista.db"
 FRONT_DIR  = BASE_DIR / "frontend"
- 
+
 # Groq config - set via environment variable on Railway
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL   = "openai/gpt-oss-20b"  # Fast, free, excellent quality
- 
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -31,10 +31,10 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
 }
- 
+
 app = Flask(__name__, static_folder=str(FRONT_DIR))
 CORS(app)
- 
+
 # ── DATABASE ─────────────────────────────────────────────────────────────
 def init_db():
     DB_PATH.parent.mkdir(exist_ok=True)
@@ -106,7 +106,7 @@ def init_db():
     con.commit()
     _seed_demo_data(cur, con)
     con.close()
- 
+
 def _seed_demo_data(cur, con):
     cur.execute("SELECT COUNT(*) FROM coffees")
     if cur.fetchone()[0] > 0:
@@ -155,12 +155,12 @@ def _seed_demo_data(cur, con):
         ("Stumptown Coffee","https://www.stumptowncoffee.com","Portland, OR","Pacific Northwest icon, Hair Bender is a must-try.","Agent"),
     ])
     con.commit()
- 
+
 def get_db():
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     return con
- 
+
 # ── WEB SCRAPER ───────────────────────────────────────────────────────────
 def safe_get(url, timeout=12):
     try:
@@ -170,7 +170,7 @@ def safe_get(url, timeout=12):
     except Exception as e:
         print(f"[scraper] {url} -> {e}")
         return None
- 
+
 def scrape_coffee_review():
     items = []
     for url in ["https://www.coffeereview.com/top-rated/","https://www.coffeereview.com/category/espresso/"]:
@@ -180,7 +180,7 @@ def scrape_coffee_review():
             t = el.get_text(strip=True)
             if t: items.append(f"[CoffeeReview] {t}")
     return items
- 
+
 def scrape_roaster_pages():
     items = []
     sources = [
@@ -209,7 +209,7 @@ def scrape_roaster_pages():
             if 4 < len(t) < 100:
                 items.append(f"[{name}] {t}")
     return items
- 
+
 def scrape_community():
     items = []
     for url, label in [
@@ -224,7 +224,7 @@ def scrape_community():
             if len(t) > 10 and any(k in t.lower() for k in ["coffee","espresso","roast","bean","blend","origin"]):
                 items.append(f"[{label}] {t}")
     return items
- 
+
 def run_all_scrapers():
     results = []
     lock = threading.Lock()
@@ -243,11 +243,11 @@ def run_all_scrapers():
     for t in threads: t.join(timeout=15)
     print(f"[scraper] Collected {len(results)} items")
     return results
- 
+
 # ── GROQ AGENT ────────────────────────────────────────────────────────────
 def check_groq():
     return bool(GROQ_API_KEY)
- 
+
 def groq_query(prompt, system):
     if not GROQ_API_KEY:
         print("[groq] ERROR: No API key")
@@ -263,7 +263,7 @@ def groq_query(prompt, system):
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.7,
-        "max_tokens": 2000
+        "max_tokens": 4000
     }
     try:
         r = requests.post(GROQ_URL, headers=headers, json=payload, timeout=45)
@@ -282,18 +282,18 @@ def groq_query(prompt, system):
     except Exception as ex:
         print("[groq] Exception: " + str(ex))
         return None
- 
+
 def agent_search(query=""):
     print(f"[agent] Search: '{query or 'general discovery'}'")
     raw = run_all_scrapers()
     raw_text = "\n".join(raw[:25]) if raw else ""
- 
+
     system = (
         "You are Il Barista, an expert specialty coffee connoisseur. "
         "Return ONLY a valid JSON array. No markdown, no explanation, no preamble. "
         "Start with [ and end with ]."
     )
- 
+
     prompt = (
         f"USER PREFERENCES: Specialty whole bean coffee enthusiast. "
         f"Loves thick full-bodied espresso and americano. "
@@ -309,30 +309,47 @@ def agent_search(query=""):
         "Prioritize variety across roasters, origins, and price points. "
         "Return ONLY the JSON array."
     )
- 
+
     response = groq_query(prompt, system)
     coffees = []
     if response:
+        # Strip markdown fences
+        response = re.sub(r'```[a-z]*', '', response).strip()
+        # Try full array parse first
         try:
             match = re.search(r'\[.*\]', response, re.DOTALL)
             if match:
                 coffees = json.loads(match.group())
-                print(f"[groq] Parsed {len(coffees)} results")
+                print(f"[groq] Parsed {len(coffees)} full results")
         except Exception as e:
-            print(f"[groq] Parse error: {e}")
- 
+            print(f"[groq] Full parse error: {e}")
+            # Try extracting individual objects
+            try:
+                objects = re.findall(r'\{[^{}]*\}', response, re.DOTALL)
+                for obj in objects:
+                    try:
+                        parsed = json.loads(obj)
+                        if 'name' in parsed and 'roaster' in parsed:
+                            coffees.append(parsed)
+                    except:
+                        pass
+                print(f"[groq] Recovered {len(coffees)} partial results")
+            except Exception as e2:
+                print(f"[groq] Recovery error: {e2}")
+
     if not coffees:
+        print("[groq] Using fallback")
         coffees = _fallback_coffees()
- 
+
     try:
         con = get_db()
         con.execute("INSERT INTO agent_log (query,sources,result_count) VALUES (?,?,?)",
             (query, f"{len(raw)} scraped items", len(coffees)))
         con.commit(); con.close()
     except: pass
- 
+
     return {"coffees": coffees, "sources_scraped": len(raw), "ran_at": datetime.now().isoformat()}
- 
+
 def _fallback_coffees():
     return [
         {"name":"Espresso Classico","roaster":"Intelligentsia Coffee","roaster_url":"https://www.intelligentsiacoffee.com","origin":"Brazil / Ethiopia","roast":"Medium Dark","process":"Washed","altitude":"1200-1800 masl","price":"$21.00 / 12oz","rating":4.6,"rating_source":"CoffeeReview.com 94pts","flavors":["Dark Chocolate","Brown Sugar","Dried Cherry","Full Body"],"commentary":"A quintessential espresso blend with extraordinary balance. Brazil base delivers velvet body, Ethiopian component adds winey sweetness.","purchase_url":"https://www.intelligentsiacoffee.com/products/espresso-classico","review_url":"https://www.coffeereview.com","agent_pick":True},
@@ -340,10 +357,10 @@ def _fallback_coffees():
         {"name":"Hair Bender","roaster":"Stumptown Coffee","roaster_url":"https://www.stumptowncoffee.com","origin":"Latin America / East Africa / Indonesia","roast":"Medium Dark","process":"Mixed","altitude":"1400-1900 masl","price":"$17.00 / 12oz","rating":4.5,"rating_source":"Home-Barista Community Favourite","flavors":["Dark Fruit","Caramel","Citrus","Heavy Body"],"commentary":"Stumptown flagship espresso blend, a Portland institution since 2001. Three-continent complexity delivers remarkable consistency.","purchase_url":"https://www.stumptowncoffee.com/products/hair-bender","review_url":"https://www.home-barista.com","agent_pick":True},
         {"name":"Super Crema","roaster":"Lavazza","roaster_url":"https://www.lavazza.com","origin":"Brazil / Colombia","roast":"Medium Dark","process":"Natural","altitude":"900-1200 masl","price":"$12.00 / 1lb","rating":4.3,"rating_source":"Amazon 4.3 stars (8,400+ reviews)","flavors":["Hazelnut","Honey","Almond","Thick Crema"],"commentary":"Italian classic with Robusta for persistent crema. The go-to daily driver for value and consistency.","purchase_url":"https://www.lavazza.com/en-us/coffee/espresso/super-crema-espresso.html","review_url":"https://www.amazon.com","agent_pick":False},
     ]
- 
+
 # ── BACKGROUND REFRESH ────────────────────────────────────────────────────
 _cache = {"time": None, "data": None}
- 
+
 def background_refresh():
     time.sleep(20)
     while True:
@@ -356,16 +373,16 @@ def background_refresh():
         except Exception as e:
             print(f"[agent] Refresh error: {e}")
         time.sleep(6 * 3600)
- 
+
 # ── API ROUTES ────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return send_from_directory(str(FRONT_DIR), "index.html")
- 
+
 @app.route("/<path:path>")
 def static_files(path):
     return send_from_directory(str(FRONT_DIR), path)
- 
+
 @app.route("/api/status")
 def api_status():
     return jsonify({
@@ -375,13 +392,13 @@ def api_status():
         "last_refresh": _cache["time"],
         "time": datetime.now().isoformat()
     })
- 
+
 @app.route("/api/search")
 def api_search():
     query = request.args.get("q", "")
     result = agent_search(query)
     return jsonify(result)
- 
+
 @app.route("/api/coffees", methods=["GET"])
 def api_coffees():
     status = request.args.get("status")
@@ -392,7 +409,7 @@ def api_coffees():
         rows = con.execute("SELECT * FROM coffees ORDER BY added_at DESC").fetchall()
     con.close()
     return jsonify([dict(r) for r in rows])
- 
+
 @app.route("/api/coffees", methods=["POST"])
 def api_add_coffee():
     data = request.json
@@ -418,7 +435,7 @@ def api_add_coffee():
         })
     con.commit(); con.close()
     return jsonify({"ok": True})
- 
+
 @app.route("/api/coffees/<int:cid>", methods=["PATCH"])
 def api_update_coffee(cid):
     data = request.json
@@ -428,14 +445,14 @@ def api_update_coffee(cid):
             con.execute(f"UPDATE coffees SET {field}=? WHERE id=?", (data[field], cid))
     con.commit(); con.close()
     return jsonify({"ok": True})
- 
+
 @app.route("/api/purchases", methods=["GET"])
 def api_purchases():
     con = get_db()
     rows = con.execute("SELECT * FROM purchases ORDER BY added_at DESC").fetchall()
     con.close()
     return jsonify([dict(r) for r in rows])
- 
+
 @app.route("/api/purchases", methods=["POST"])
 def api_add_purchase():
     data = request.json
@@ -449,14 +466,14 @@ def api_add_purchase():
          "added_by":data.get("added_by","Anonymous")})
     con.commit(); con.close()
     return jsonify({"ok": True})
- 
+
 @app.route("/api/journal", methods=["GET"])
 def api_journal():
     con = get_db()
     rows = con.execute("SELECT * FROM journal ORDER BY created_at DESC").fetchall()
     con.close()
     return jsonify([dict(r) for r in rows])
- 
+
 @app.route("/api/journal", methods=["POST"])
 def api_add_journal():
     data = request.json
@@ -470,14 +487,14 @@ def api_add_journal():
          "added_by":data.get("added_by","Anonymous")})
     con.commit(); con.close()
     return jsonify({"ok": True})
- 
+
 @app.route("/api/roasters", methods=["GET"])
 def api_roasters():
     con = get_db()
     rows = con.execute("SELECT * FROM roasters ORDER BY saved_at DESC").fetchall()
     con.close()
     return jsonify([dict(r) for r in rows])
- 
+
 @app.route("/api/roasters", methods=["POST"])
 def api_add_roaster():
     data = request.json
@@ -486,7 +503,7 @@ def api_add_roaster():
         {**data, "added_by": data.get("added_by","Anonymous")})
     con.commit(); con.close()
     return jsonify({"ok": True})
- 
+
 # ── MAIN ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 55)
