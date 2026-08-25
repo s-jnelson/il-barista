@@ -154,6 +154,30 @@ body{font-family:'Lato',sans-serif;background:var(--chalk);color:var(--espresso)
 #offline-banner{background:rgba(139,58,26,.12);border:1px solid rgba(139,58,26,.25);border-radius:9px;padding:11px 16px;margin-bottom:18px;font-size:12.5px;color:var(--rust);display:none}
 #offline-banner.vis{display:flex;align-items:center;gap:10px}
 @media(max-width:900px){.stats{grid-template-columns:1fr 1fr}.mgrid{grid-template-columns:1fr}.grid{grid-template-columns:1fr}}
+
+/* ── REGIONAL SELECTOR ── */
+.regional-modal{display:none;position:fixed;inset:0;background:rgba(26,10,0,.6);z-index:300;align-items:center;justify-content:center}
+.regional-modal.vis{display:flex}
+.regional-box{background:var(--milk);border-radius:18px;padding:28px;width:640px;max-height:85vh;overflow-y:auto;box-shadow:0 20px 60px rgba(26,10,0,.4)}
+.regional-box h3{font-family:'Playfair Display',serif;font-size:20px;color:var(--roast);margin-bottom:6px}
+.regional-box p{font-size:12.5px;color:var(--smoke);margin-bottom:20px;font-style:italic}
+.region-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px}
+.region-tab{padding:6px 14px;border-radius:16px;border:1.5px solid var(--tile);background:var(--chalk);font-size:12px;font-weight:700;color:var(--smoke);cursor:pointer;transition:all .15s}
+.region-tab:hover{border-color:var(--crema);color:var(--roast)}
+.region-tab.active{background:var(--crema);color:var(--espresso);border-color:var(--crema)}
+.subregion-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:18px}
+.subregion-card{padding:10px 14px;border:1.5px solid var(--tile);border-radius:10px;cursor:pointer;transition:all .15s;background:var(--chalk)}
+.subregion-card:hover{border-color:var(--crema);background:rgba(200,137,58,.06)}
+.subregion-card.selected{border-color:var(--crema);background:rgba(200,137,58,.12)}
+.subregion-card .sr-name{font-size:13px;font-weight:700;color:var(--roast);margin-bottom:3px}
+.subregion-card .sr-items{font-size:10px;color:var(--smoke)}
+.specifics{margin-bottom:16px}
+.specifics-label{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--smoke);font-weight:700;margin-bottom:8px}
+.specific-tags{display:flex;flex-wrap:wrap;gap:6px}
+.specific-tag{padding:4px 12px;border-radius:12px;border:1.5px solid var(--tile);font-size:11px;color:var(--smoke);cursor:pointer;background:var(--chalk);transition:all .15s}
+.specific-tag:hover{border-color:var(--crema);color:var(--roast)}
+.specific-tag.selected{background:var(--roast);color:var(--foam);border-color:var(--roast)}
+.regional-acts{display:flex;gap:10px;justify-content:flex-end;margin-top:6px}
 </style>
 </head>
 <body>
@@ -169,7 +193,7 @@ body{font-family:'Lato',sans-serif;background:var(--chalk);color:var(--espresso)
     <div class="ni" onclick="nav('discovery')"><span class="ic">&#128269;</span> Discoveries</div>
     <div class="nav-sec" style="margin-top:6px">My Cellar</div>
     <div class="ni" onclick="nav('library')"><span class="ic">&#128218;</span> Coffee Library</div>
-    <div class="ni" onclick="nav('tracker')"><span class="ic">&#x1F6D2;</span> Purchase Tracker</div>
+    <div class="ni" onclick="nav('tracker')"><span class="ic">&#128Shopping;</span> Purchase Tracker</div>
     <div class="ni" onclick="nav('wishlist')"><span class="ic">&#10084;</span> Wishlist</div>
     <div class="ni" onclick="nav('roasters')"><span class="ic">&#127981;</span> Saved Roasters</div>
     <div class="ni" onclick="nav('journal')"><span class="ic">&#128221;</span> Tasting Journal</div>
@@ -204,6 +228,7 @@ body{font-family:'Lato',sans-serif;background:var(--chalk);color:var(--espresso)
           <button class="btn btn-o" onclick="doSearch('best espresso blends dark roast full body')">Top Blends</button>
           <button class="btn btn-o" onclick="doSearch('single origin espresso fruity')">Single Origins</button>
           <button class="btn btn-o" onclick="doSearch('SCA award winning espresso 2025')">Award Winners</button>
+          <button class="btn btn-o" onclick="openRegional()" style="background:rgba(200,137,58,.15);border-color:var(--crema)">&#127757; Regional</button>
         </div>
       </div>
       <div class="sbar">
@@ -295,6 +320,27 @@ body{font-family:'Lato',sans-serif;background:var(--chalk);color:var(--espresso)
   </div>
 
   
+</div>
+
+
+<!-- REGIONAL SELECTOR MODAL -->
+<div class="regional-modal" id="regional-modal" onclick="if(event.target===this)closeRegional()">
+  <div class="regional-box">
+    <h3>&#127757; Regional Coffee Explorer</h3>
+    <p>Find roasters by where they operate, or beans by where they are grown</p>
+
+    <div class="region-tabs" id="region-tabs"></div>
+    <div class="subregion-grid" id="subregion-grid"></div>
+    <div class="specifics" id="specifics-section" style="display:none">
+      <div class="specifics-label">Narrow by specific location</div>
+      <div class="specific-tags" id="specific-tags"></div>
+    </div>
+
+    <div class="regional-acts">
+      <button class="btn btn-o" onclick="closeRegional()">Cancel</button>
+      <button class="btn btn-p" onclick="runRegionalSearch()">Search This Region</button>
+    </div>
+  </div>
 </div>
 
 <div id="modal" onclick="if(event.target===this)closeModal()">
@@ -664,6 +710,123 @@ function toast(msg) {
   var t = document.getElementById('toast');
   t.classList.add('show');
   setTimeout(function(){ t.classList.remove('show'); }, 3000);
+}
+
+
+// ══ REGIONAL EXPLORER ══
+const REGIONS = {
+  "United States": {
+    "Pacific Northwest": ["Washington","Oregon","Portland","Seattle"],
+    "California": ["Bay Area","San Francisco","Los Angeles","San Diego","Oakland"],
+    "Northeast": ["New York City","Boston","Philadelphia","Maine","Vermont"],
+    "Southeast": ["Atlanta","Asheville","Charleston","Nashville","Miami"],
+    "Midwest": ["Chicago","Minneapolis","Detroit","Columbus","Milwaukee"],
+    "Southwest": ["Austin","Denver","Phoenix","Albuquerque","Santa Fe"],
+    "Mountain West": ["Salt Lake City","Bozeman","Spokane"]
+  },
+  "Coffee Origins": {
+    "East Africa": ["Ethiopia","Kenya","Rwanda","Burundi","Tanzania","Uganda"],
+    "Central America": ["Guatemala","Costa Rica","Honduras","El Salvador","Panama","Nicaragua"],
+    "South America": ["Colombia","Brazil","Peru","Bolivia","Ecuador"],
+    "Asia Pacific": ["Indonesia","Papua New Guinea","Timor-Leste","Vietnam","Myanmar"],
+    "Arabia & India": ["Yemen","India"],
+    "Caribbean": ["Jamaica","Haiti","Puerto Rico","Dominican Republic"]
+  },
+  "Europe": {
+    "Italy": ["Rome","Milan","Naples","Turin","Florence"],
+    "Scandinavia": ["Oslo","Stockholm","Copenhagen","Helsinki","Bergen"],
+    "UK & Ireland": ["London","Edinburgh","Manchester","Dublin","Bristol"],
+    "Central Europe": ["Berlin","Vienna","Amsterdam","Zurich","Hamburg"],
+    "Eastern Europe": ["Warsaw","Prague","Budapest","Krakow"]
+  },
+  "Asia & Oceania": {
+    "East Asia": ["Tokyo","Seoul","Taipei","Shanghai","Hong Kong"],
+    "Southeast Asia": ["Singapore","Bangkok","Manila","Kuala Lumpur"],
+    "Australia": ["Melbourne","Sydney","Brisbane","Adelaide"],
+    "New Zealand": ["Auckland","Wellington","Christchurch"]
+  },
+  "Americas": {
+    "Canada": ["Vancouver","Toronto","Montreal","Calgary","Victoria"],
+    "Mexico": ["Mexico City","Oaxaca","Guadalajara","San Cristobal"],
+    "Caribbean & Central": ["San Jose","Panama City","Kingston","Santo Domingo"]
+  },
+  "Middle East & Africa": {
+    "Middle East": ["Tel Aviv","Dubai","Beirut","Amman"],
+    "North Africa": ["Casablanca","Cairo","Tunis"],
+    "Sub-Saharan Africa": ["Cape Town","Nairobi","Lagos","Johannesburg"]
+  }
+};
+
+let _selRegion = null;
+let _selSubregion = null;
+let _selSpecific = null;
+
+function openRegional() {
+  _selRegion = null; _selSubregion = null; _selSpecific = null;
+  renderRegionTabs();
+  document.getElementById('subregion-grid').innerHTML = '';
+  document.getElementById('specifics-section').style.display = 'none';
+  document.getElementById('regional-modal').classList.add('vis');
+}
+
+function closeRegional() {
+  document.getElementById('regional-modal').classList.remove('vis');
+}
+
+function renderRegionTabs() {
+  const tabs = document.getElementById('region-tabs');
+  tabs.innerHTML = Object.keys(REGIONS).map(r =>
+    '<div class="region-tab' + (r === _selRegion ? ' active' : '') + '" onclick="selectRegion('' + r.replace(/'/g,"\'") + '')">' + r + '</div>'
+  ).join('');
+}
+
+function selectRegion(name) {
+  _selRegion = name; _selSubregion = null; _selSpecific = null;
+  renderRegionTabs();
+  const subs = REGIONS[name];
+  document.getElementById('subregion-grid').innerHTML = Object.entries(subs).map(([sub, items]) =>
+    '<div class="subregion-card" onclick="selectSubregion('' + sub.replace(/'/g,"\'") + '')">' +
+    '<div class="sr-name">' + sub + '</div>' +
+    '<div class="sr-items">' + items.slice(0,3).join(', ') + (items.length > 3 ? '...' : '') + '</div>' +
+    '</div>'
+  ).join('');
+  document.getElementById('specifics-section').style.display = 'none';
+}
+
+function selectSubregion(name) {
+  _selSubregion = name; _selSpecific = null;
+  document.querySelectorAll('.subregion-card').forEach(c => {
+    c.classList.toggle('selected', c.querySelector('.sr-name').textContent === name);
+  });
+  const items = REGIONS[_selRegion][name];
+  const sec = document.getElementById('specifics-section');
+  document.getElementById('specific-tags').innerHTML = items.map(item =>
+    '<div class="specific-tag" onclick="selectSpecific('' + item.replace(/'/g,"\'") + '')">' + item + '</div>'
+  ).join('');
+  sec.style.display = 'block';
+}
+
+function selectSpecific(name) {
+  _selSpecific = _selSpecific === name ? null : name;
+  document.querySelectorAll('.specific-tag').forEach(t => {
+    t.classList.toggle('selected', t.textContent === _selSpecific);
+  });
+}
+
+function runRegionalSearch() {
+  if (!_selRegion) { toast('Please select a region first'); return; }
+  let query = '';
+  const specific = _selSpecific || _selSubregion || _selRegion;
+
+  if (_selRegion === 'Coffee Origins') {
+    query = 'single origin coffee beans from ' + specific + ' specialty roasters direct trade';
+  } else {
+    query = 'specialty coffee roasters based in ' + specific + ' local independent whole bean espresso';
+  }
+
+  closeRegional();
+  doSearch(query);
+  toast('Searching ' + specific + ' coffee scene...');
 }
 
 // INIT
