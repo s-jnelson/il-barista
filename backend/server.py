@@ -250,34 +250,37 @@ def check_groq():
 
 def groq_query(prompt, system):
     if not GROQ_API_KEY:
-        print("[groq] No API key configured")
+        print("[groq] ERROR: No API key")
         return None
+    headers = {
+        "Authorization": "Bearer " + GROQ_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 1200
+    }
     try:
-        r = requests.post(GROQ_URL,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": GROQ_MODEL,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": prompt}
-                ],
-                "temperature": 0.7,
-                "max_tokens": 1200,
-            },
-            timeout=30
-        )
-        print(f"[groq] Status: {r.status_code}")
-        r.raise_for_status()
-        result = r.json()
-        content = result["choices"][0]["message"]["content"]
-        print(f"[groq] Response length: {len(content)} chars")
-        print(f"[groq] Preview: {content[:300]}")
-        return content
-    except Exception as e:
-        print(f"[groq] Error: {type(e).__name__}: {e}")
+        r = requests.post(GROQ_URL, headers=headers, json=payload, timeout=45)
+        print("[groq] HTTP status: " + str(r.status_code))
+        if r.status_code != 200:
+            print("[groq] Error body: " + r.text[:500])
+            return None
+        data = r.json()
+        text = data["choices"][0]["message"]["content"]
+        print("[groq] Got response, length: " + str(len(text)))
+        print("[groq] First 200 chars: " + text[:200])
+        return text
+    except requests.exceptions.Timeout:
+        print("[groq] Request timed out after 45s")
+        return None
+    except Exception as ex:
+        print("[groq] Exception: " + str(ex))
         return None
 
 def agent_search(query=""):
