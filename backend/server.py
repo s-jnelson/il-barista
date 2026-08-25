@@ -356,6 +356,13 @@ def _fallback_coffees():
         {"name":"Super Crema","roaster":"Lavazza","roaster_url":"https://www.lavazza.com","origin":"Brazil / Colombia","roast":"Medium Dark","process":"Natural","altitude":"900-1200 masl","price":"$12.00 / 1lb","rating":4.3,"rating_source":"Amazon 4.3 stars (8,400+ reviews)","flavors":["Hazelnut","Honey","Almond","Thick Crema"],"commentary":"Italian classic with Robusta for persistent crema. The go-to daily driver for value and consistency.","purchase_url":"https://www.lavazza.com/en-us/coffee/espresso","review_url":"https://www.amazon.com","agent_pick":False},
     ]
 
+# ── INIT DATABASE AT MODULE LEVEL ────────────────────────────────────────
+try:
+    init_db()
+    print("[startup] Database initialized at module load")
+except Exception as _startup_err:
+    print(f"[startup] DB init failed: {_startup_err}")
+
 # ── BACKGROUND REFRESH ────────────────────────────────────────────────────
 _cache = {"time": None, "data": None}
 
@@ -399,14 +406,22 @@ def api_search():
 
 @app.route("/api/coffees", methods=["GET"])
 def api_coffees():
-    status = request.args.get("status")
-    con = get_db()
-    if status:
-        rows = con.execute("SELECT * FROM coffees WHERE status=? ORDER BY added_at DESC", (status,)).fetchall()
-    else:
-        rows = con.execute("SELECT * FROM coffees ORDER BY added_at DESC").fetchall()
-    con.close()
-    return jsonify([dict(r) for r in rows])
+    try:
+        if not DB_PATH.exists():
+            print(f"[db] DB not found at {DB_PATH}, reinitializing...")
+            init_db()
+        status = request.args.get("status")
+        con = get_db()
+        if status:
+            rows = con.execute("SELECT * FROM coffees WHERE status=? ORDER BY added_at DESC", (status,)).fetchall()
+        else:
+            rows = con.execute("SELECT * FROM coffees ORDER BY added_at DESC").fetchall()
+        con.close()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        print(f"[api_coffees] Error: {e}")
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/coffees", methods=["POST"])
 def api_add_coffee():
